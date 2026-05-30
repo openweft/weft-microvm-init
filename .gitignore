@@ -1,0 +1,4 @@
+# Built outputs from `task build-*`.
+/bin/
+/weft-init
+/crun-build/dist/

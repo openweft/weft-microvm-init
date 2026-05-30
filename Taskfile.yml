@@ -1,0 +1,81 @@
+version: '3'
+
+# weft-microvm-init: PID 1 inside an openweft micro-VM.
+# Linux-only target (the guest), but build/test targets are
+# cross-compiled from the host (typically darwin/arm64).
+#
+# The OCI runtime (crun) is no longer embedded: `task build-crun`
+# cross-builds static crun into crun-build/dist/, and the runner packs it
+# into the pod initramfs alongside weft-init (initbuild.PodInitrd). The
+# guest resolves /bin/crun from $PATH.
+
+vars:
+  BIN: weft-init
+  OUT: bin
+  # crun release used by both build-crun (source) and fetch-crun
+  # (prebuilt). Bump as needed.
+  CRUN_VERSION: '1.27.1'
+  CRUN_BASE: 'https://github.com/containers/crun/releases/download'
+  DIST: crun-build/dist
+
+tasks:
+  build-crun:
+    desc: "Cross-compile static crun for all 4 arches with zig (no container) into crun-build/dist/"
+    cmds:
+      - CRUN_VERSION={{.CRUN_VERSION}} ./crun-build/zig-build.sh
+
+  build-cfs:
+    desc: "Cross-compile the CubeFS client (cfs-client) for all 4 arches into cfs-build/dist/ (pure Go, no cgo)"
+    cmds:
+      - ./cfs-build/build.sh
+
+  build-crun-container:
+    desc: "Fallback: build static crun via buildx+QEMU (colima/docker) instead of zig"
+    cmds:
+      - CRUN_VERSION={{.CRUN_VERSION}} ./crun-build/build.sh
+
+  fetch-crun:
+    desc: "Download prebuilt static crun binaries (no build); amd64/arm64/riscv64 only — loong64 has no prebuilt asset"
+    cmds:
+      - mkdir -p {{.DIST}}
+      # amd64 / arm64 / riscv64 ship as static release assets named
+      # crun-<ver>-linux-<arch>.
+      - curl -fsSL -o {{.DIST}}/crun.linux.amd64 {{.CRUN_BASE}}/{{.CRUN_VERSION}}/crun-{{.CRUN_VERSION}}-linux-amd64
+      - curl -fsSL -o {{.DIST}}/crun.linux.arm64 {{.CRUN_BASE}}/{{.CRUN_VERSION}}/crun-{{.CRUN_VERSION}}-linux-arm64
+      - curl -fsSL -o {{.DIST}}/crun.linux.riscv64 {{.CRUN_BASE}}/{{.CRUN_VERSION}}/crun-{{.CRUN_VERSION}}-linux-riscv64
+      # LoongArch64: crun names the asset "loongarch64"; map it onto
+      # the Go-arch filename loong64. Not every crun release ships
+      # this asset — if the download 404s, build crun for loongarch64
+      # yourself and drop it at {{.DIST}}/crun.linux.loong64.
+      - curl -fsSL -o {{.DIST}}/crun.linux.loong64 {{.CRUN_BASE}}/{{.CRUN_VERSION}}/crun-{{.CRUN_VERSION}}-linux-loongarch64
+      - chmod +x {{.DIST}}/crun.linux.amd64 {{.DIST}}/crun.linux.arm64 {{.DIST}}/crun.linux.riscv64 {{.DIST}}/crun.linux.loong64
+
+  build:
+    desc: "Cross-compile weft-init (static, CGO_ENABLED=0) for the 4 guest arches. crun/cfs-client are packed alongside it by `weft microvm pod-init-build`, not embedded."
+    cmds:
+      - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o {{.OUT}}/{{.BIN}}-linux-amd64 ./cmd/{{.BIN}}
+      - GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o {{.OUT}}/{{.BIN}}-linux-arm64 ./cmd/{{.BIN}}
+      - GOOS=linux GOARCH=riscv64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o {{.OUT}}/{{.BIN}}-linux-riscv64 ./cmd/{{.BIN}}
+      - GOOS=linux GOARCH=loong64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o {{.OUT}}/{{.BIN}}-linux-loong64 ./cmd/{{.BIN}}
+
+  build-nort:
+    desc: "Build without the embedded runtime (for dev; falls back to PATH crun)"
+    cmds:
+      - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o {{.OUT}}/{{.BIN}}-linux-amd64 ./cmd/{{.BIN}}
+      - GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o {{.OUT}}/{{.BIN}}-linux-arm64 ./cmd/{{.BIN}}
+      - GOOS=linux GOARCH=riscv64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o {{.OUT}}/{{.BIN}}-linux-riscv64 ./cmd/{{.BIN}}
+      - GOOS=linux GOARCH=loong64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o {{.OUT}}/{{.BIN}}-linux-loong64 ./cmd/{{.BIN}}
+
+  test:
+    desc: "Run unit tests (host-side, no PID 1 syscalls exercised)"
+    cmds:
+      - go test -mod=mod ./...
+
+  lint:
+    desc: "Vet the module"
+    cmds:
+      - go vet -mod=mod ./...
+
+  clean:
+    cmds:
+      - rm -rf {{.OUT}}
