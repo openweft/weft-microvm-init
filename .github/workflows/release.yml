@@ -5,24 +5,27 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Image tag (e.g. v0.2.0)"
+        description: "Image tag (e.g. v0.2.1)"
         required: true
 
 permissions:
   contents: read
   packages: write
 
-# Publishes a 4-arch OCI image at ghcr.io/openweft/weft-microvm-pod-initrd:<tag>
-# whose runtime stage is FROM scratch + COPY pod-initrd.cpio.gz. The puller
-# (a forthcoming `weft microvm pull-pod-initrd` CLI, symmetrical with
-# pull-kernel) reaches in via the standard OCI pull path and pulls /pod-initrd
-# out of the layer ; the multi-arch manifest list means a single
-# `pull-pod-initrd <ref>` call lands the right arch's initramfs automatically.
+# Publishes a 4-arch OCI artifact at
+# ghcr.io/openweft/weft-microvm-pod-initrd:<tag> using ORAS, with the
+# openweft media-type convention :
 #
-# Pattern : `weft microvm pod-init-build` does the cpio assembly on the
-# runner natively for the runner's arch (amd64), and via QEMU emulation
-# for the other 3 archs (TCG-only, slow but works since the initramfs
-# build is pure file copy + gzip — no kernel-level emulation needed).
+#   artifactType : application/vnd.openweft.microvm.pod-initrd
+#   layer        : application/vnd.openweft.microvm.pod-initrd.cpio.gz
+#
+# This mirrors the openweft/weft-microvm-kernel pattern (kernel /
+# kernel.image / kernel.config). The puller is `weft microvm
+# pull-pod-initrd`, sibling of `weft microvm pull-kernel`.
+#
+# Multi-arch is expressed as an OCI index : one per-arch manifest
+# pointing at its own cpio.gz layer, plus a top-level index with
+# platform descriptors so `oras pull ref` Just-Works on any host.
 
 jobs:
   build:
@@ -66,20 +69,13 @@ jobs:
             ls -la out/pod-initrd-$arch.cpio.gz
           done
 
-      - name: Set up QEMU (riscv64 + loong64 binfmt for the buildx COPY)
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64,riscv64,loong64
+      - name: Setup ORAS
+        uses: oras-project/setup-oras@v1
 
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Login to GHCR (oras)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
 
       - name: Resolve tag
         id: tag
@@ -90,27 +86,29 @@ jobs:
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Synthesise a minimal Dockerfile (per-arch COPY)
+      - name: Push 4 per-arch manifests via ORAS
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          cat > Dockerfile <<'EOF'
-          FROM scratch
-          ARG TARGETARCH
-          COPY out/pod-initrd-${TARGETARCH}.cpio.gz /pod-initrd.cpio.gz
-          LABEL org.opencontainers.image.title="weft-microvm-pod-initrd"
-          LABEL org.opencontainers.image.description="openweft pod-mode initramfs : weft-init + crun, packed per-arch"
-          LABEL org.opencontainers.image.source="https://github.com/openweft/weft-microvm-init"
-          LABEL org.opencontainers.image.licenses="BSD-3-Clause AND GPL-2.0+ (crun)"
-          EOF
-
-      - name: Build + push 4-arch
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64,linux/arm64,linux/riscv64,linux/loong64
-          push: true
-          tags: |
-            ghcr.io/openweft/weft-microvm-pod-initrd:${{ steps.tag.outputs.tag }}
-            ghcr.io/openweft/weft-microvm-pod-initrd:latest
-          provenance: false
-          sbom: false
+          set -euo pipefail
+          REPO=ghcr.io/openweft/weft-microvm-pod-initrd
+          ART=application/vnd.openweft.microvm.pod-initrd
+          LAYER=application/vnd.openweft.microvm.pod-initrd.cpio.gz
+          # Push one artifact per arch with a platform-suffixed tag.
+          # Then assemble a multi-arch OCI index pointing at all 4.
+          for arch in amd64 arm64 riscv64 loong64; do
+            oras push --artifact-type "$ART" \
+              "$REPO:${TAG}-${arch}" \
+              "out/pod-initrd-$arch.cpio.gz:$LAYER" \
+              --annotation "org.opencontainers.image.title=pod-initrd" \
+              --annotation "org.opencontainers.image.description=openweft pod-mode initramfs (weft-init + crun)" \
+              --annotation "org.opencontainers.image.source=https://github.com/openweft/weft-microvm-init"
+          done
+          # Index : one descriptor per arch with platform metadata.
+          oras manifest index create "$REPO:${TAG}" \
+            $(for arch in amd64 arm64 riscv64 loong64; do
+                echo --platform linux/$arch
+                echo "$REPO:${TAG}-${arch}"
+              done)
+          # Move :latest to point at the new index.
+          oras tag "$REPO:${TAG}" latest
