@@ -27,9 +27,13 @@ func main() {
 		crunBin  = flag.String("crun", "", "path to the Linux crun binary -> bin/crun")
 		cfsBin   = flag.String("cfs-client", "", "path to the Linux cfs-client binary -> bin/cfs-client")
 		agentBin = flag.String("agent", "", "path to the Linux weft-microvm-agent binary -> bin/weft-microvm-agent")
-		out      = flag.String("output", "", "output cpio.gz path (required)")
+		out      = flag.String("o", "", "output cpio.gz path (required) — short alias of --output")
+		outLong  = flag.String("output", "", "output cpio.gz path (required) — long form, matches `weft microvm pod-init-build`")
 	)
 	flag.Parse()
+	if *out == "" {
+		*out = *outLong
+	}
 	if *initBin == "" {
 		fmt.Fprintln(os.Stderr, "--init is required")
 		flag.Usage()
