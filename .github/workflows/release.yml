@@ -41,8 +41,13 @@ jobs:
       - name: Setup go-task
         run: go install github.com/go-task/task/v3/cmd/task@latest
 
-      - name: Fetch static crun binaries (4 archs)
-        run: $(go env GOPATH)/bin/task fetch-crun
+      - name: Install pkgx (zig-build.sh uses `pkgx bash` + `pkgx zig`)
+        run: |
+          curl -fsSL https://pkgx.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build static crun for 4 archs (zig, no container, no upstream loong64 prebuilt)
+        run: $(go env GOPATH)/bin/task build-crun
 
       - name: Cross-build weft-init for 4 archs
         run: |
