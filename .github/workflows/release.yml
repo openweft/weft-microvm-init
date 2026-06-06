@@ -1,0 +1,116 @@
+name: Release pod-initrd
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+# Publishes a 4-arch OCI image at ghcr.io/openweft/weft-microvm-pod-initrd:<tag>
+# whose runtime stage is FROM scratch + COPY pod-initrd.cpio.gz. The puller
+# (a forthcoming `weft microvm pull-pod-initrd` CLI, symmetrical with
+# pull-kernel) reaches in via the standard OCI pull path and pulls /pod-initrd
+# out of the layer ; the multi-arch manifest list means a single
+# `pull-pod-initrd <ref>` call lands the right arch's initramfs automatically.
+#
+# Pattern : `weft microvm pod-init-build` does the cpio assembly on the
+# runner natively for the runner's arch (amd64), and via QEMU emulation
+# for the other 3 archs (TCG-only, slow but works since the initramfs
+# build is pure file copy + gzip — no kernel-level emulation needed).
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Setup go-task
+        run: go install github.com/go-task/task/v3/cmd/task@latest
+
+      - name: Fetch static crun binaries (4 archs)
+        run: $(go env GOPATH)/bin/task fetch-crun
+
+      - name: Cross-build weft-init for 4 archs
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          for arch in amd64 arm64 riscv64 loong64; do
+            GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build \
+              -trimpath -ldflags='-s -w' \
+              -o bin/weft-init-linux-$arch ./cmd/weft-init
+          done
+
+      - name: Install weft (provides `weft microvm pod-init-build`)
+        run: go install github.com/openweft/weft/cmd/weft@latest
+
+      - name: Build 4-arch pod-initrd cpio.gz
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          for arch in amd64 arm64 riscv64 loong64; do
+            $(go env GOPATH)/bin/weft microvm pod-init-build \
+              --init bin/weft-init-linux-$arch \
+              --crun crun-build/dist/crun.linux.$arch \
+              -o out/pod-initrd-$arch.cpio.gz
+            ls -la out/pod-initrd-$arch.cpio.gz
+          done
+
+      - name: Set up QEMU (riscv64 + loong64 binfmt for the buildx COPY)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,riscv64,loong64
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Synthesise a minimal Dockerfile (per-arch COPY)
+        run: |
+          cat > Dockerfile <<'EOF'
+          FROM scratch
+          ARG TARGETARCH
+          COPY out/pod-initrd-${TARGETARCH}.cpio.gz /pod-initrd.cpio.gz
+          LABEL org.opencontainers.image.title="weft-microvm-pod-initrd"
+          LABEL org.opencontainers.image.description="openweft pod-mode initramfs : weft-init + crun, packed per-arch"
+          LABEL org.opencontainers.image.source="https://github.com/openweft/weft-microvm-init"
+          LABEL org.opencontainers.image.licenses="BSD-3-Clause AND GPL-2.0+ (crun)"
+          EOF
+
+      - name: Build + push 4-arch
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64,linux/riscv64,linux/loong64
+          push: true
+          tags: |
+            ghcr.io/openweft/weft-microvm-pod-initrd:${{ steps.tag.outputs.tag }}
+            ghcr.io/openweft/weft-microvm-pod-initrd:latest
+          provenance: false
+          sbom: false
