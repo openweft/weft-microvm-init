@@ -59,15 +59,15 @@ jobs:
               -o bin/weft-init-linux-$arch ./cmd/weft-init
           done
 
-      - name: Install weft (provides `weft microvm pod-init-build`)
-        run: go install github.com/openweft/weft/cmd/weft@latest
+      - name: Install pod-init-build (standalone cpio assembler)
+        run: go install ./cmd/pod-init-build
 
       - name: Build 4-arch pod-initrd cpio.gz
         run: |
           set -euo pipefail
           mkdir -p out
           for arch in amd64 arm64 riscv64 loong64; do
-            $(go env GOPATH)/bin/weft microvm pod-init-build \
+            $(go env GOPATH)/bin/pod-init-build \
               --init bin/weft-init-linux-$arch \
               --crun crun-build/dist/crun.linux.$arch \
               -o out/pod-initrd-$arch.cpio.gz
