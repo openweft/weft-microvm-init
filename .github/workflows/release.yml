@@ -103,17 +103,19 @@ jobs:
           # Then assemble a multi-arch OCI index pointing at all 4.
           for arch in amd64 arm64 riscv64 loong64; do
             oras push --artifact-type "$ART" \
+              --artifact-platform linux/$arch \
               "$REPO:${TAG}-${arch}" \
               "out/pod-initrd-$arch.cpio.gz:$LAYER" \
               --annotation "org.opencontainers.image.title=pod-initrd" \
               --annotation "org.opencontainers.image.description=openweft pod-mode initramfs (weft-init + crun)" \
               --annotation "org.opencontainers.image.source=https://github.com/openweft/weft-microvm-init"
           done
-          # Index : one descriptor per arch with platform metadata.
+          # Index : positional child tags only ; oras reads each child's
+          # --artifact-platform annotation (set above) to populate the
+          # index's platform descriptors. The old workflow tried to pass
+          # --platform flags interleaved with tags, which oras 1.3+
+          # rejects as unknown flags.
           oras manifest index create "$REPO:${TAG}" \
-            $(for arch in amd64 arm64 riscv64 loong64; do
-                echo --platform linux/$arch
-                echo "$REPO:${TAG}-${arch}"
-              done)
+            "${TAG}-amd64" "${TAG}-arm64" "${TAG}-riscv64" "${TAG}-loong64"
           # Move :latest to point at the new index.
           oras tag "$REPO:${TAG}" latest
