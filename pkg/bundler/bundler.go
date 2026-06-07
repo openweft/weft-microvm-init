@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -156,10 +157,7 @@ func buildSpec(podID string, c *pod.Container, rootfsPath string) spec {
 	args := append([]string{}, c.Command...)
 	args = append(args, c.Args...)
 
-	env := defaultEnv()
-	for k, v := range c.Env {
-		env = append(env, k+"="+v)
-	}
+	env := mergeEnv(defaultEnv(), c.Env)
 
 	caps := defaultCaps(c.Privileged)
 
@@ -270,6 +268,51 @@ func buildResources(r pod.Resources) *resources {
 	}
 	if r.PidsMax > 0 {
 		out.Pids = &pids{Limit: r.PidsMax}
+	}
+	return out
+}
+
+// mergeEnv folds the user-supplied env map onto the defaults with
+// override-on-conflict + deterministic ordering. The OCI runtime
+// honours the last instance of a duplicate key in Process.Env, so a
+// naive append-from-map relied on Go map iteration order — meaning
+// two consecutive Build()s of the same Container could emit byte-
+// different config.json files, and a user override of PATH was won
+// by whichever copy crun saw last (non-deterministic). The merge
+// here :
+//   - keeps `defaults` order for any default key not overridden,
+//   - replaces a default value when c.Env names the same key,
+//   - appends any new c.Env keys in sorted order (stable bytes
+//     regardless of map enumeration).
+//
+// Pure ; unit-testable without a runtime.
+func mergeEnv(defaults []string, overrides map[string]string) []string {
+	out := make([]string, 0, len(defaults)+len(overrides))
+	consumed := make(map[string]struct{}, len(overrides))
+	for _, d := range defaults {
+		k, _, ok := strings.Cut(d, "=")
+		if !ok {
+			out = append(out, d) // malformed default ; preserve verbatim
+			continue
+		}
+		if v, has := overrides[k]; has {
+			out = append(out, k+"="+v)
+			consumed[k] = struct{}{}
+			continue
+		}
+		out = append(out, d)
+	}
+	// Remaining override keys, in sorted order, so equal inputs produce
+	// equal outputs across Go versions + builds.
+	remaining := make([]string, 0, len(overrides)-len(consumed))
+	for k := range overrides {
+		if _, done := consumed[k]; !done {
+			remaining = append(remaining, k)
+		}
+	}
+	sort.Strings(remaining)
+	for _, k := range remaining {
+		out = append(out, k+"="+overrides[k])
 	}
 	return out
 }
