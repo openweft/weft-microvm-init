@@ -114,6 +114,17 @@ func run(log *slog.Logger, specPath string) error {
 		return fmt.Errorf("shares: %w", err)
 	}
 
+	// After shares are mounted, fill in missing Command/Env/Workdir/User
+	// from each rootfs's <rootfs>/.weft-microvm/config.json. The host
+	// puller writes that file for every pulled image, so a host that
+	// emits a spec with empty Command (the single-container shorthand,
+	// or a forward-compat pod manifest) Just Works against standard
+	// Docker/OCI images — including distroless, where /bin/sh doesn't
+	// exist and the previous hardcoded fallback exited immediately.
+	if err := enrichContainers(log, spec); err != nil {
+		return fmt.Errorf("resolve image entrypoints: %w", err)
+	}
+
 	if err := network.Apply(spec.Network); err != nil {
 		return fmt.Errorf("network: %w", err)
 	}
@@ -289,19 +300,18 @@ func synthSingleContainerPod() *pod.Spec {
 	// The mount_point is what prepareBundles' fallback path also expects
 	// (/run/weft/rootfs/<id>), so the same code path handles both
 	// explicitly-mounted shares and this synthesised one.
+	//
+	// Command is intentionally left empty : enrichContainers (called after
+	// mountShares) fills it from <rootfs>/.weft-microvm/config.json — the
+	// resolved OCI image entrypoint the host puller writes. That makes
+	// the single-container shorthand work with standard Docker/OCI images
+	// (alpine, debian, distroless, …) without the host having to mint a
+	// pod manifest.
 	const id = "main"
 	return &pod.Spec{
 		PodID: "single",
 		Containers: []pod.Container{
-			{
-				ID:        id,
-				RootfsTag: tag,
-				// /bin/sh is universal across busybox/musl distros (alpine,
-				// debian, …) and gives an immediate, observable proof that
-				// the rootfs share is mounted and exec-able. Override-able
-				// once weft microvm run grows a pod-spec emission path.
-				Command: []string{"/bin/sh"},
-			},
+			{ID: id, RootfsTag: tag},
 		},
 		Shares: []pod.Share{
 			{Tag: tag, MountPoint: "/run/weft/rootfs/" + id},
@@ -400,6 +410,34 @@ func prepareBundles(log *slog.Logger, spec *pod.Spec) (map[string]string, error)
 		log.Info("bundle built", "container", c.ID, "bundle", bundleDir, "rootfs", rootfs)
 	}
 	return out, nil
+}
+
+// enrichContainers walks the pod's containers and, for any that arrive
+// with no Command (the single-container shorthand or a forward-compat
+// pod manifest that defers entrypoint resolution to the guest), fills
+// in Command/Env/Workdir/User from <rootfs>/.weft-microvm/config.json.
+// The host puller writes that file for every pulled image — including
+// distroless, where there is no /bin/sh to fall back to.
+func enrichContainers(log *slog.Logger, spec *pod.Spec) error {
+	for i := range spec.Containers {
+		c := &spec.Containers[i]
+		if len(c.Command) > 0 {
+			continue
+		}
+		rootfs := resolveRootfs(spec, c)
+		if rootfs == "" {
+			return fmt.Errorf("container %q: no rootfs for tag %q", c.ID, c.RootfsTag)
+		}
+		if err := pod.EnrichFromImage(c, rootfs); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("container %q: no command in spec and no <rootfs>/.weft-microvm/config.json (host puller too old?)", c.ID)
+			}
+			return fmt.Errorf("container %q: %w", c.ID, err)
+		}
+		log.Info("container entrypoint resolved from image",
+			"id", c.ID, "args", c.Command, "user", c.User, "cwd", c.Workdir)
+	}
+	return nil
 }
 
 func resolveRootfs(spec *pod.Spec, c *pod.Container) string {
