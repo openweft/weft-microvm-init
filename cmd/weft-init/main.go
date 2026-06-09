@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/openweft/weft-microvm-init/pkg/bundler"
+	"github.com/openweft/weft-microvm-init/pkg/cubefs"
 	"github.com/openweft/weft-microvm-init/pkg/network"
 	"github.com/openweft/weft-microvm-init/pkg/pod"
 	"github.com/openweft/weft-microvm-init/pkg/runtime/crun"
@@ -112,6 +113,16 @@ func run(log *slog.Logger, specPath string) error {
 
 	if err := mountShares(log, spec); err != nil {
 		return fmt.Errorf("shares: %w", err)
+	}
+
+	// Boot-time CubeFS mounts : when the cmdline carries `weft.cubefs=…`
+	// directives (translated by synthSingleContainerPod into
+	// Spec.ShareMounts), launch cfs-client once per entry and wait for
+	// the FUSE mount to come up before any container starts. Same
+	// mechanism the agent uses for dynamic mounts ; both call into
+	// pkg/cubefs.Mount under the hood.
+	if err := mountCubeFSShares(log, spec); err != nil {
+		return fmt.Errorf("cubefs shares: %w", err)
 	}
 
 	// After shares are mounted, fill in missing Command/Env/Workdir/User
@@ -308,15 +319,160 @@ func synthSingleContainerPod() *pod.Spec {
 	// (alpine, debian, distroless, …) without the host having to mint a
 	// pod manifest.
 	const id = "main"
+	shares := []pod.Share{
+		{Tag: tag, MountPoint: "/run/weft/rootfs/" + id},
+	}
+	// Additional hostpath mounts requested via `weft microvm run -v`
+	// land here. The host emits one `weft.mount=virtiofs:<tag>:
+	// <guestpath>[:ro]` token per mount on the kernel cmdline ; we
+	// parse them all and add a Share per token. The container bundle
+	// builder later bind-mounts these into the container's rootfs.
+	mounts := cmdlineValues("weft.mount")
+	for _, raw := range mounts {
+		share, err := parseMountDirective(raw)
+		if err != nil {
+			log := slog.Default()
+			log.Warn("weft.mount directive ignored", "value", raw, "err", err)
+			continue
+		}
+		shares = append(shares, share)
+	}
+	// CubeFS RWX shares requested via `weft microvm run --cubefs`. Each
+	// directive `weft.cubefs=<masters>:<volume>:<guestpath>[:ro]` becomes
+	// a pod.ShareMount entry the agent (or weft-init's own boot phase)
+	// passes to cfs-client. The bind-mount into the container uses the
+	// MountPoint, exactly like the virtiofs shares above.
+	cubefsMounts := cmdlineValues("weft.cubefs")
+	containerCubefsMounts := make([]pod.Mount, 0, len(cubefsMounts))
+	shareMounts := make([]pod.ShareMount, 0, len(cubefsMounts))
+	for i, raw := range cubefsMounts {
+		sm, err := parseCubeFSDirective(raw, i)
+		if err != nil {
+			log := slog.Default()
+			log.Warn("weft.cubefs directive ignored", "value", raw, "err", err)
+			continue
+		}
+		shareMounts = append(shareMounts, sm)
+		opts := []string{"bind"}
+		if sm.Readonly {
+			opts = append(opts, "ro")
+		}
+		containerCubefsMounts = append(containerCubefsMounts, pod.Mount{
+			Source:      sm.MountPoint,
+			Destination: sm.MountPoint,
+			Type:        "bind",
+			Options:     opts,
+		})
+	}
+
+	containerMounts := append(extractContainerMounts(mounts), containerCubefsMounts...)
 	return &pod.Spec{
 		PodID: "single",
 		Containers: []pod.Container{
-			{ID: id, RootfsTag: tag},
+			{ID: id, RootfsTag: tag, Mounts: containerMounts},
 		},
-		Shares: []pod.Share{
-			{Tag: tag, MountPoint: "/run/weft/rootfs/" + id},
-		},
+		Shares:      shares,
+		ShareMounts: shareMounts,
 	}
+}
+
+// parseCubeFSDirective turns a kernel-cmdline `weft.cubefs=...` token
+// into a pod.ShareMount targeting CubeFS. Syntax :
+//
+//	weft.cubefs=<master1,master2,…>:<volume>:<guestpath>[:ro]
+//
+// Multiple master addresses are comma-separated. The trailing ":ro"
+// modifier mounts the share read-only inside the guest. The agent
+// resolves the resulting ShareMount through cfs-client (already in
+// the initramfs at /bin/cfs-client per pod-init-build --cfs-client).
+func parseCubeFSDirective(raw string, idx int) (pod.ShareMount, error) {
+	parts := strings.Split(raw, ":")
+	if len(parts) < 3 {
+		return pod.ShareMount{}, fmt.Errorf("expected <masters>:<volume>:<guest>[:ro], got %q", raw)
+	}
+	masters := strings.Split(parts[0], ",")
+	volume := parts[1]
+	mountPoint := parts[2]
+	ro := len(parts) >= 4 && parts[3] == "ro"
+	if volume == "" || mountPoint == "" || len(masters) == 0 || masters[0] == "" {
+		return pod.ShareMount{}, fmt.Errorf("masters/volume/guest all required, got %q", raw)
+	}
+	return pod.ShareMount{
+		ID:         fmt.Sprintf("cubefs-%d", idx),
+		Backend:    pod.BackendCubeFS,
+		MountPoint: mountPoint,
+		Readonly:   ro,
+		CubeFS: &pod.CubeFSMount{
+			Volume:  volume,
+			Masters: masters,
+		},
+	}, nil
+}
+
+// parseMountDirective converts a `weft.mount=virtiofs:<tag>:<guest>[:ro]`
+// directive into a pod.Share. Returns an error when the directive is
+// missing the tag or guest path ; the caller logs + skips bad entries
+// so one bad token doesn't tank the whole boot.
+func parseMountDirective(raw string) (pod.Share, error) {
+	// Strip the transport prefix exactly like stripTransportPrefix
+	// does for the rootfs directive — the host always sends
+	// "virtiofs:..." today but a future 9p path would slot in.
+	v := raw
+	if i := strings.IndexByte(v, ':'); i >= 0 {
+		v = v[i+1:]
+	}
+	parts := strings.Split(v, ":")
+	if len(parts) < 2 {
+		return pod.Share{}, fmt.Errorf("expected <tag>:<guest>[:ro], got %q", raw)
+	}
+	share := pod.Share{Tag: parts[0], MountPoint: parts[1]}
+	if len(parts) >= 3 && parts[2] == "ro" {
+		share.Readonly = true
+	}
+	return share, nil
+}
+
+// extractContainerMounts emits the per-container bind-mount list that
+// pairs each weft.mount directive's GuestPath to the share we mounted
+// at it. The container bundle builder uses these to make the host
+// directory visible *inside* the container, not just in the VM root
+// namespace.
+func extractContainerMounts(directives []string) []pod.Mount {
+	out := make([]pod.Mount, 0, len(directives))
+	for _, raw := range directives {
+		share, err := parseMountDirective(raw)
+		if err != nil {
+			continue
+		}
+		opts := []string{"bind"}
+		if share.Readonly {
+			opts = append(opts, "ro")
+		}
+		out = append(out, pod.Mount{
+			Source:      share.MountPoint,
+			Destination: share.MountPoint,
+			Type:        "bind",
+			Options:     opts,
+		})
+	}
+	return out
+}
+
+// cmdlineValues returns every occurrence of a kernel cmdline key.
+// Used by the multi-mount support : `weft.mount=…` can repeat across
+// the cmdline, one directive per host mount.
+func cmdlineValues(key string) []string {
+	b, err := os.ReadFile("/proc/cmdline")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, tok := range strings.Fields(string(b)) {
+		if v, ok := strings.CutPrefix(tok, key+"="); ok {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // stripTransportPrefix removes a leading "<transport>:" from cmdline values
@@ -469,4 +625,36 @@ func poweroff(log *slog.Logger, delay time.Duration) {
 		// Last resort: spin forever rather than returning to the kernel.
 		select {}
 	}
+}
+
+// mountCubeFSShares iterates the boot-time CubeFS share mount entries
+// the host requested (via `weft microvm run --cubefs`) and launches a
+// cfs-client process per entry. Blocks until each FUSE mount is live —
+// the container that bind-mounts it shouldn't start with an empty
+// mount point under it.
+//
+// Failures are fatal : a workload that expects its CubeFS share
+// shouldn't run without it. The cfs-client processes survive past
+// weft-init's exec into the supervisor since cfs-client double-forks
+// behind the FUSE mount.
+func mountCubeFSShares(log *slog.Logger, spec *pod.Spec) error {
+	for _, sm := range spec.ShareMounts {
+		if sm.EffectiveBackend() != pod.BackendCubeFS {
+			continue
+		}
+		if err := sm.Validate(); err != nil {
+			return fmt.Errorf("cubefs %q: %w", sm.ID, err)
+		}
+		if _, err := cubefs.Mount(sm); err != nil {
+			return fmt.Errorf("cubefs mount %s at %s: %w", sm.ID, sm.MountPoint, err)
+		}
+		log.Info("cubefs mounted",
+			"id", sm.ID,
+			"at", sm.MountPoint,
+			"volume", sm.CubeFS.Volume,
+			"masters", sm.CubeFS.Masters,
+			"ro", sm.Readonly,
+		)
+	}
+	return nil
 }
