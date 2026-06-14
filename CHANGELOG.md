@@ -7,6 +7,8 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-06-14
+
 ### Added
 
 - **`pod.FirewallStatus` type + `network.ReadFirewallStatus`** : the
