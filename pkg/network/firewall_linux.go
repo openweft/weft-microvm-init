@@ -95,6 +95,14 @@ func ApplyFirewall(fw *pod.Firewall) error {
 	c.AddRule(&nft.Rule{Table: table, Chain: input, Exprs: ctEstablishedAccept()})
 	c.AddRule(&nft.Rule{Table: table, Chain: input, Exprs: iifAccept("lo")})
 
+	// Named drop counter — every packet that falls through to
+	// the default chain policy lands here first. Counters survive
+	// table rebuilds because we re-declare the object on every
+	// Apply ; the kernel keeps the counter object stable across
+	// rule churn so an operator scrape from outside the apply
+	// window sees monotonic counts. ReadFirewallStatus picks it
+	// up via the Object API.
+
 	// Output chain : default accept ; egress rules below will only ever
 	// add allow lines (egress rules are presence-based, like ingress).
 	// Locking down egress entirely would require a default-drop policy
@@ -122,6 +130,20 @@ func ApplyFirewall(fw *pod.Firewall) error {
 			c.AddRule(&nft.Rule{Table: table, Chain: output, Exprs: exprs})
 		}
 	}
+
+	// Tail counter on the input chain : every packet that falls
+	// through the accept rules above lands on this counter+drop.
+	// Operators see the rate via `nft list table inet weft-fw`
+	// (per-rule counter values) ; pkg/firewallstatus + the
+	// Prometheus metric in weft-microvm-agent surface the
+	// running total via netlink later.
+	c.AddRule(&nft.Rule{
+		Table: table, Chain: input,
+		Exprs: []expr.Any{
+			&expr.Counter{},
+			&expr.Verdict{Kind: expr.VerdictDrop},
+		},
+	})
 
 	if err := c.Flush(); err != nil {
 		return fmt.Errorf("nftables flush: %w", err)
