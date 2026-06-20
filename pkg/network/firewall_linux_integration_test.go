@@ -85,9 +85,11 @@ func TestApplyFirewall_BaselineInstallsTableWithDefaultDenyInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRules(input): %v", err)
 	}
-	// Baseline = ct established/related accept + iifname lo accept.
-	if len(inRules) != 2 {
-		t.Errorf("baseline input rule count = %d, want 2", len(inRules))
+	// Baseline = ct established/related accept + iifname lo accept + the tail
+	// counter+drop rule ApplyFirewall always installs on the input chain for
+	// drop metrics.
+	if len(inRules) != 3 {
+		t.Errorf("baseline input rule count = %d, want 3", len(inRules))
 	}
 	outRules, err := c.GetRules(tb, output)
 	if err != nil {
@@ -121,8 +123,8 @@ func TestApplyFirewall_AddsIngressRulesOnTopOfBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRules(input): %v", err)
 	}
-	// 2 baseline rules + 3 user-supplied ingress rules.
-	if got, want := len(inRules), 2+3; got != want {
+	// 2 baseline + 3 user-supplied ingress + 1 tail counter+drop rule.
+	if got, want := len(inRules), 2+3+1; got != want {
 		t.Errorf("input rule count = %d, want %d", got, want)
 	}
 
@@ -157,10 +159,10 @@ func TestApplyFirewall_RoutesEgressRulesToOutputChain(t *testing.T) {
 	inRules, _ := c.GetRules(tb, input)
 	outRules, _ := c.GetRules(tb, output)
 
-	if got, want := len(inRules), 2+1; got != want { // 2 baseline + 1 ingress
+	if got, want := len(inRules), 2+1+1; got != want { // 2 baseline + 1 ingress + tail counter+drop
 		t.Errorf("input rule count = %d, want %d", got, want)
 	}
-	if got, want := len(outRules), 2; got != want { // 2 egress
+	if got, want := len(outRules), 2; got != want { // 2 egress (output chain has no tail rule)
 		t.Errorf("output rule count = %d, want %d", got, want)
 	}
 }
@@ -189,8 +191,8 @@ func TestApplyFirewall_SecondApplyReplacesPriorState(t *testing.T) {
 	c, _ := nft.New(nft.AsLasting())
 	defer c.CloseLasting()
 	inRules, _ := c.GetRules(tb, input)
-	if got, want := len(inRules), 2+1; got != want {
-		t.Errorf("replaced input rule count = %d, want %d (2 baseline + 1 new)", got, want)
+	if got, want := len(inRules), 2+1+1; got != want {
+		t.Errorf("replaced input rule count = %d, want %d (2 baseline + 1 new + tail counter+drop)", got, want)
 	}
 }
 
