@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"syscall"
 	"time"
@@ -103,7 +104,21 @@ func (s *Supervisor) startOne(ctx context.Context, c *pod.Container, st *contain
 	// to keep at INFO so a stuck microVM is debuggable from console.log
 	// alone, no in-guest shell required.
 	s.log.Info("runtime create starting", "container", c.ID, "bundle", bundle, "runtime", s.rt.Name())
-	if err := s.rt.Create(ctx, c.ID, bundle, runtime.Stdio{}); err != nil {
+	// The container inherits whatever stdio crun is given. Hand it the CONSOLE,
+	// not the parent's capture pipe: exec.Cmd with a bytes.Buffer builds an
+	// os.Pipe and waits for every writer to close it, and the container init
+	// holds that pipe open for its whole life -- so `crun create` returned only
+	// when the container exited, which for a service is never. The console is
+	// also where `weft microvm logs` reads from, so the output lands where a
+	// user already looks.
+	stdio := runtime.Stdio{}
+	if con, err := os.OpenFile("/dev/console", os.O_WRONLY, 0); err == nil {
+		defer con.Close()
+		stdio.Stdout, stdio.Stderr = con, con
+	} else {
+		s.log.Warn("no console for container stdio (falling back to a pipe)", "err", err)
+	}
+	if err := s.rt.Create(ctx, c.ID, bundle, stdio); err != nil {
 		return err
 	}
 	s.log.Info("runtime create done; starting", "container", c.ID)

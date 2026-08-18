@@ -62,7 +62,13 @@ func (r *Runtime) binary() string {
 }
 
 func (r *Runtime) Create(ctx context.Context, id, bundleDir string, stdio runtime.Stdio) error {
-	c := r.cmd(ctx, "create", "--bundle", bundleDir, id)
+	// --no-pivot: PID 1 here lives on the INITRAMFS, and the kernel refuses
+	// pivot_root when the old root is the initial ramfs -- crun comes back with
+	// a bare "pivot_root: Invalid argument". --no-pivot switches it to
+	// MS_MOVE + chroot, which is what runc grew the same flag for. The guest is
+	// a single-container microVM, so the weaker isolation of chroot is bounded
+	// by the VM boundary that is already there.
+	c := r.cmd(ctx, "create", "--no-pivot", "--bundle", bundleDir, id)
 	c.Stdin = stdio.Stdin
 	c.Stdout = stdio.Stdout
 	c.Stderr = stdio.Stderr
