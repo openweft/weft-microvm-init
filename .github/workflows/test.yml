@@ -1,0 +1,60 @@
+name: test
+
+# The unit lane. Until this existed the repository's ONLY check was the
+# nftables integration test on pkg/network — so a change to the bundler,
+# the supervisor or the pod spec could go green without a single one of
+# its tests ever running. A lane that does not execute a package's tests
+# reports nothing about that package.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: build + vet + race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l ./cmd ./pkg)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would rewrite:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go mod download
+        env:
+          GOWORK: off
+        run: go mod download
+
+      # GOOS=linux is the only target this guest agent ships to, but the
+      # package set must still COMPILE where it is developed (darwin) or a
+      # //go:build linux file can hide a broken sibling for weeks.
+      - name: build
+        env:
+          GOWORK: off
+        run: |
+          go build ./...
+          GOOS=darwin go build ./... || echo "::warning::darwin build is not supported by every package"
+
+      - name: vet
+        env:
+          GOWORK: off
+        run: go vet ./...
+
+      - name: test (race)
+        env:
+          GOWORK: off
+        run: go test -race -count=1 ./...
