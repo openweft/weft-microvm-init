@@ -8,12 +8,14 @@
 // Runtime Specification v1.0.2.
 //
 // Scope of this MVP:
-//   - mono-container per pod: each container gets fresh pid/net/
-//     uts/ipc/mount namespaces.
-//   - pod-style namespace sharing (pause container pattern) is a
-//     follow-up: store the first container's PID, then emit
-//     `{"type": "network", "path": "/proc/<pid>/ns/net"}` for
-//     siblings instead of an empty entry that creates a new ns.
+//   - each container gets fresh pid/uts/ipc/mount namespaces, and
+//     JOINS the pod's network namespace — the one the init configured
+//     from Spec.Network. Only pod.Container.Net = "none" asks for a
+//     private (empty, offline) netns. See namespacesFor.
+//   - pod-style sharing of the OTHER namespaces (pause container
+//     pattern) is a follow-up: store the first container's PID, then
+//     emit `{"type": "ipc", "path": "/proc/<pid>/ns/ipc"}` for siblings
+//     instead of an empty entry that creates a new ns.
 package bundler
 
 import (
@@ -33,7 +35,9 @@ const ociVersion = "1.0.2"
 // BundlesRoot is where Build() places per-container bundle dirs.
 // One dir per container holds the generated config.json ; the
 // rootfs is referenced by absolute path inside that config.
-const BundlesRoot = "/run/weft/bundles"
+// It is a var, not a const, so tests can build bundles under t.TempDir()
+// instead of requiring a writable /run on the machine running `go test`.
+var BundlesRoot = "/run/weft/bundles"
 
 // Build writes a config.json for c into <BundlesRoot>/<c.ID>/.
 // rootfsPath is the absolute path of the container's root
@@ -56,7 +60,7 @@ func Build(podID string, c *pod.Container, rootfsPath string) (string, error) {
 	}
 
 	spec := buildSpec(podID, c, rootfsPath)
-	b, err := json.MarshalIndent(spec, "", "  ")
+	b, err := jsonMarshalIndent(spec, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal config.json: %w", err)
 	}
@@ -162,6 +166,9 @@ func buildSpec(podID string, c *pod.Container, rootfsPath string) spec {
 	caps := defaultCaps(c.Privileged)
 
 	mounts := defaultMounts()
+	if m, ok := resolvConfMount(c); ok {
+		mounts = append(mounts, m)
+	}
 	for _, m := range c.Mounts {
 		mounts = append(mounts, mount{
 			Destination: m.Destination,
@@ -194,13 +201,90 @@ func buildSpec(podID string, c *pod.Container, rootfsPath string) spec {
 		Hostname: podID,
 		Mounts:   mounts,
 		Linux: &linuxCfg{
-			Namespaces:    namespacesFromEnv(),
+			Namespaces:    namespacesFor(c),
 			Resources:     buildResources(c.Resources),
 			MaskedPaths:   defaultMaskedPaths(),
 			ReadonlyPaths: defaultReadonlyPaths(),
 		},
 	}
 }
+
+// resolvConfPath is the resolver the init writes from Spec.Network.DNS
+// (pkg/network.writeResolvConf) — in the INIT's root, i.e. the initramfs.
+var resolvConfPath = "/etc/resolv.conf"
+
+// osStat is a seam so tests can decide whether the init has a resolver
+// without writing to the real /etc.
+var osStat = os.Stat
+
+// jsonMarshalIndent is a seam. The spec types hold nothing json refuses to
+// encode, so the error branch below is unreachable in production — and an
+// unreachable branch that has never been executed is a branch nobody has
+// checked returns a useful message.
+var jsonMarshalIndent = json.MarshalIndent
+
+// resolvConfMount bind-mounts the init's resolver into the container.
+//
+// Joining the pod netns gives a container ROUTES, not a resolver: it keeps
+// its own mount namespace and its own rootfs, so it reads the resolv.conf
+// that the OCI image shipped — and a FROM-scratch image ships none. That is
+// the second half of the same failure, and it hides behind the first: with
+// the netns fixed, `getaddrinfo` still fell back to [::1]:53 and every
+// lookup was refused by nothing at all.
+//
+// Skipped when the init has no resolver (no Spec.Network, or DNS unset):
+// binding a file that does not exist would fail the container's create.
+// Read-only, because nothing in a container should rewrite the pod's DNS.
+func resolvConfMount(c *pod.Container) (mount, bool) {
+	if c.Net == "none" {
+		return mount{}, false
+	}
+	if _, err := osStat(resolvConfPath); err != nil {
+		return mount{}, false
+	}
+	return mount{
+		Destination: "/etc/resolv.conf",
+		Type:        "bind",
+		Source:      resolvConfPath,
+		Options:     []string{"rbind", "ro", "nosuid", "nodev", "noexec"},
+	}, true
+}
+
+// namespacesFor returns the namespaces to request for c.
+//
+// A container joins the POD's network namespace by default — the one the
+// init configured from Spec.Network before starting anything. Asking for a
+// fresh `network` namespace instead is not a stricter version of the same
+// thing, it is a BROKEN one: the init creates no veth pair and no bridge,
+// so a private netns contains a loopback and nothing else. Measured inside
+// a weft micro-VM: /proc/net/dev listed only `lo` and `sit0`, /etc/resolv.conf
+// was absent, and every connection died with "Network is unreachable" — while
+// the VM's own eth0 was up and NATed the whole time.
+//
+// c.Net == "none" keeps the private netns, now as a deliberate choice for
+// offline workloads rather than an accident. $WEFT_BUNDLE_NAMESPACES still
+// wins over both: it is the debug lever, and a debug lever that a spec field
+// can override is no lever at all.
+func namespacesFor(c *pod.Container) []namespace {
+	ns := namespacesFromEnv()
+	if _, overridden := os.LookupEnv(bundleNamespacesEnv); overridden {
+		return ns
+	}
+	if c.Net == "none" {
+		return ns
+	}
+	out := make([]namespace, 0, len(ns))
+	for _, n := range ns {
+		if n.Type == "network" {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// bundleNamespacesEnv is the debug override read by namespacesFromEnv.
+const bundleNamespacesEnv = "WEFT_BUNDLE_NAMESPACES"
 
 // namespacesFromEnv reads $WEFT_BUNDLE_NAMESPACES — a comma-separated list
 // of OCI namespace types to request in the generated bundle. Defaults to
@@ -214,8 +298,7 @@ func buildSpec(podID string, c *pod.Container, rootfsPath string) spec {
 // rebuilding the binary for every variant. Production callers leave it
 // unset; the dev harness sets it explicitly.
 func namespacesFromEnv() []namespace {
-	const env = "WEFT_BUNDLE_NAMESPACES"
-	raw, ok := os.LookupEnv(env)
+	raw, ok := os.LookupEnv(bundleNamespacesEnv)
 	if !ok {
 		return []namespace{
 			{Type: "pid"},
