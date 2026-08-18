@@ -1,6 +1,6 @@
 module github.com/openweft/weft-microvm-init
 
-go 1.25.1
+go 1.26.4
 
 require (
 	github.com/google/nftables v0.3.0
