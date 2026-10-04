@@ -1,11 +1,12 @@
 module github.com/openweft/weft-microvm-init
 
-go 1.26.4
+go 1.27.1
 
 require (
 	github.com/google/nftables v0.3.0
 	github.com/grpc-transports/wireguard v0.3.0
 	github.com/openweft/weft-microvm v0.2.0
+	github.com/vishvananda/netns v0.0.5
 	golang.org/x/sys v0.44.0
 )
 
@@ -16,7 +17,6 @@ require (
 	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/vishvananda/netlink v1.3.1 // indirect
-	github.com/vishvananda/netns v0.0.5 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
