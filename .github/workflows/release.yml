@@ -7,6 +7,17 @@ on:
       tag:
         description: "Image tag (e.g. v0.2.1)"
         required: true
+  # A pull request that touches the release path runs every build step
+  # and stops before logging in or pushing: the v0.2.4 tag run failed at
+  # "Setup go-task" and nothing had exercised this path since.
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'Taskfile.yml'
+      - 'crun-build/**'
+      - 'cmd/**'
+      - 'go.mod'
+      - 'go.sum'
 
 permissions:
   contents: read
@@ -38,8 +49,12 @@ jobs:
         with:
           go-version: '1.27.2'
 
+      # Pinned: `@latest` is resolved at run time, so a task release that
+      # raises its go directive past the toolchain above breaks this step
+      # with no change here. The v0.2.4 run failed at this step; its log
+      # has expired, so the exact cause can no longer be read.
       - name: Setup go-task
-        run: go install github.com/go-task/task/v3/cmd/task@latest
+        run: go install github.com/go-task/task/v3/cmd/task@v3.54.0
 
       - name: Install pkgx (zig-build.sh uses `pkgx bash` + `pkgx zig`)
         run: |
@@ -78,6 +93,7 @@ jobs:
         uses: oras-project/setup-oras@v1
 
       - name: Login to GHCR (oras)
+        if: github.event_name != 'pull_request'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io \
             --username "${{ github.actor }}" --password-stdin
@@ -92,6 +108,7 @@ jobs:
           fi
 
       - name: Push 4 per-arch manifests via ORAS
+        if: github.event_name != 'pull_request'
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
