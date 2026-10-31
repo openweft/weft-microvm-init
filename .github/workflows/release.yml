@@ -47,7 +47,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.27.2'
+          go-version: '1.27.3'
 
       # Pinned: `@latest` is resolved at run time, so a task release that
       # raises its go directive past the toolchain above breaks this step
