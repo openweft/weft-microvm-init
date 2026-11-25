@@ -6,8 +6,10 @@ require (
 	github.com/google/nftables v0.3.0
 	github.com/grpc-transports/wireguard v0.3.0
 	github.com/openweft/weft-microvm v0.2.0
+	github.com/openweft/weft-proto v0.24.0
 	github.com/vishvananda/netns v0.0.5
 	golang.org/x/sys v0.49.0
+	google.golang.org/grpc v1.84.0
 )
 
 require (
@@ -26,7 +28,6 @@ require (
 	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446 // indirect
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
-	google.golang.org/grpc v1.84.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c // indirect
 )

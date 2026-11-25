@@ -7,6 +7,33 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-25
+
+### Added
+
+- **`pkg/secretclient`**: guest client for `weft.guest.v1.GuestSecrets/Fetch`
+  (weft-proto v0.24.0) over the host vsock port. Bounded retries with
+  exponential backoff on `Unavailable` / `ResourceExhausted` / a failed dial;
+  `PermissionDenied` (also "no such id") is final; a value over 64 KiB is
+  refused; error text is constant and never carries a value or token. The
+  per-boot token comes from a pluggable `TokenSource` (empty or exactly 32
+  bytes) and is sent when present.
+- **`private_key_ref`** on `pod.WireGuard` and **`access_key_ref` /
+  `secret_key_ref` / `secret_version`** on `pod.CubeFSMount`: the key is
+  fetched over vsock instead of read from the spec. The WireGuard key is
+  staged to a 0600 file under `/run` (tmpfs) and the in-memory copies are
+  wiped; the cfs-client config stays 0600 and its rendered buffer is wiped.
+  `network.ApplyWireGuardWith` and `cubefs.Resolve` /
+  `cubefs.NewRegistryWithSecrets` take the secret source.
+
+### Changed
+
+- Setting a ref together with its inline field is now an error. Inline keys
+  still work in this release and log a deprecation warning; they will be
+  refused in a later release.
+- A CubeFS mount resolves its keys before touching an existing mount, so a
+  failed fetch leaves the old mount up.
+
 ## [0.2.3] - 2026-06-14
 
 ### Added
