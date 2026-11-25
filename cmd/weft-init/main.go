@@ -47,11 +47,11 @@ const (
 	stopGrace            = 10 * time.Second
 )
 
-// bootToken is where the per-boot GuestSecrets token comes from. It is nil
-// until a driver channel for it exists: KVM provides none today, and the
-// host then relies on the vsock peer CID alone. When a channel lands, set
-// this to a source that reads it (never a kernel cmdline argument).
-var bootToken secretclient.TokenSource
+// bootToken is where the per-boot GuestSecrets token comes from: the QEMU
+// driver's fw_cfg entry (read once, kept in memory, never a kernel cmdline
+// argument). Without that entry (KVM today) the token is empty and the host
+// relies on the vsock peer CID alone.
+var bootToken = secretclient.FileTokenSource(secretclient.FWCfgTokenPath)
 
 func main() {
 	specPath := flag.String("spec", defaultPodSpecPath, "path to pod.json")

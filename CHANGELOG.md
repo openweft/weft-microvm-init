@@ -7,6 +7,17 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-25
+
+### Added
+
+- **Boot-token provider** : `secretclient.FileTokenSource` reads the per-boot
+  GuestSecrets token once from the QEMU fw_cfg entry
+  (`/sys/firmware/qemu_fw_cfg/by_name/opt/org.weft/boot-token/raw`, exactly
+  32 raw bytes), keeps it in memory only and sends it as
+  `FetchRequest.boot_token`. An absent file means no token; any other length
+  is an error and nothing is sent. `weft-init` uses it by default.
+
 ## [0.4.0] - 2026-11-25
 
 ### Added
