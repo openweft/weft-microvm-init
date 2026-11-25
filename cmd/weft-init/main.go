@@ -30,6 +30,7 @@ import (
 	"github.com/openweft/weft-microvm-init/pkg/network"
 	"github.com/openweft/weft-microvm-init/pkg/pod"
 	"github.com/openweft/weft-microvm-init/pkg/runtime/crun"
+	"github.com/openweft/weft-microvm-init/pkg/secretclient"
 	"github.com/openweft/weft-microvm-init/pkg/supervisor"
 )
 
@@ -45,6 +46,12 @@ const (
 	defaultWireGuardPath = "/run/weft/cfg/wireguard.json"
 	stopGrace            = 10 * time.Second
 )
+
+// bootToken is where the per-boot GuestSecrets token comes from. It is nil
+// until a driver channel for it exists: KVM provides none today, and the
+// host then relies on the vsock peer CID alone. When a channel lands, set
+// this to a source that reads it (never a kernel cmdline argument).
+var bootToken secretclient.TokenSource
 
 func main() {
 	specPath := flag.String("spec", defaultPodSpecPath, "path to pod.json")
@@ -121,7 +128,8 @@ func run(log *slog.Logger, specPath string) error {
 	// the FUSE mount to come up before any container starts. Same
 	// mechanism the agent uses for dynamic mounts ; both call into
 	// pkg/cubefs.Mount under the hood.
-	if err := mountCubeFSShares(log, spec); err != nil {
+	secrets := secretclient.NewVsock(secretclient.DefaultPort, bootToken)
+	if err := mountCubeFSShares(log, spec, secrets); err != nil {
 		return fmt.Errorf("cubefs shares: %w", err)
 	}
 
@@ -150,7 +158,7 @@ func run(log *slog.Logger, specPath string) error {
 		}
 	}
 	if wg != nil {
-		if err := network.ApplyWireGuard(wg); err != nil {
+		if err := network.ApplyWireGuardWith(context.Background(), wg, secrets); err != nil {
 			return fmt.Errorf("wireguard: %w", err)
 		}
 		log.Info("wireguard overlay up", "address", wg.Address, "peers", len(wg.Peers))
@@ -637,7 +645,7 @@ func poweroff(log *slog.Logger, delay time.Duration) {
 // shouldn't run without it. The cfs-client processes survive past
 // weft-init's exec into the supervisor since cfs-client double-forks
 // behind the FUSE mount.
-func mountCubeFSShares(log *slog.Logger, spec *pod.Spec) error {
+func mountCubeFSShares(log *slog.Logger, spec *pod.Spec, secrets secretclient.Source) error {
 	for _, sm := range spec.ShareMounts {
 		if sm.EffectiveBackend() != pod.BackendCubeFS {
 			continue
@@ -645,7 +653,13 @@ func mountCubeFSShares(log *slog.Logger, spec *pod.Spec) error {
 		if err := sm.Validate(); err != nil {
 			return fmt.Errorf("cubefs %q: %w", sm.ID, err)
 		}
-		if _, err := cubefs.Mount(sm); err != nil {
+		resolved, wipe, err := cubefs.Resolve(context.Background(), sm, secrets)
+		if err != nil {
+			return err
+		}
+		_, err = cubefs.Mount(resolved)
+		wipe()
+		if err != nil {
 			return fmt.Errorf("cubefs mount %s at %s: %w", sm.ID, sm.MountPoint, err)
 		}
 		log.Info("cubefs mounted",
