@@ -3,6 +3,8 @@ package cubefs
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -101,6 +103,66 @@ func TestResolveDeniedWrongIDAndNoSource(t *testing.T) {
 	}
 	if _, _, err := Resolve(context.Background(), shareWith(pod.CubeFSMount{SecretKeyRef: "Bad ID"}), src); err == nil {
 		t.Fatal("malformed ref accepted")
+	}
+}
+
+func noPanic(t *testing.T, f func()) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("panicked: %v", r)
+		}
+	}()
+	f()
+}
+
+func TestResolveAccessKeyFailureIsAnError(t *testing.T) {
+	src := &mapSource{vals: map[string]string{"sk": "S"}}
+	// the secret key would resolve; only the access-key failure can refuse
+	in := shareWith(pod.CubeFSMount{AccessKeyRef: "missing", SecretKeyRef: "sk"})
+	noPanic(t, func() {
+		_, _, err := Resolve(context.Background(), in, src)
+		if err == nil || !strings.Contains(err.Error(), "access_key_ref") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	for _, id := range src.asked {
+		if id == "sk" {
+			t.Fatal("went on to fetch the secret key after the access key failed")
+		}
+	}
+}
+
+func TestResolveFailuresAreErrorsNotPanics(t *testing.T) {
+	noPanic(t, func() {
+		in := shareWith(pod.CubeFSMount{SecretKeyRef: "sk"})
+		if _, _, err := Resolve(context.Background(), in, nil); err == nil || !strings.Contains(err.Error(), "no secret source") {
+			t.Fatalf("no source: %v", err)
+		}
+		src := &mapSource{vals: map[string]string{}}
+		if _, _, err := Resolve(context.Background(), in, src); err == nil || !strings.Contains(err.Error(), "secret_key_ref") {
+			t.Fatalf("fetch failure: %v", err)
+		}
+		if out, _, err := Resolve(context.Background(), pod.ShareMount{ID: "x"}, nil); err != nil || out.CubeFS != nil {
+			t.Fatalf("no cubefs block: %+v %v", out, err)
+		}
+	})
+}
+
+func TestMountConfigWriteFailureIsReported(t *testing.T) {
+	root := t.TempDir()
+	old := runRoot
+	runRoot = root
+	t.Cleanup(func() { runRoot = old })
+	// a directory where the config file goes makes WriteFile fail
+	if err := os.MkdirAll(filepath.Join(root, "team", "config.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := shareWith(pod.CubeFSMount{AccessKey: "A", SecretKey: "S"})
+	spec.MountPoint = filepath.Join(t.TempDir(), "mnt")
+	_, err := Mount(spec)
+	if err == nil || !strings.Contains(err.Error(), "write cfs-client config") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

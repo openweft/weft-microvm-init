@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/openweft/weft-microvm-init/pkg/pod"
@@ -47,6 +48,46 @@ func TestResolveKeyInlineStillWorks(t *testing.T) {
 	wipe()
 	if key[0] != 0 {
 		t.Fatal("inline copy not wiped")
+	}
+}
+
+// anySource would serve any id: only the caller's own check can refuse.
+type anySource struct{ calls int }
+
+func (a *anySource) Fetch(context.Context, string, uint64) (*secretclient.Secret, error) {
+	a.calls++
+	return &secretclient.Secret{Value: []byte("k"), Version: 1}, nil
+}
+
+func TestResolveKeyRefusesBadIDBeforeFetching(t *testing.T) {
+	src := &anySource{}
+	_, _, err := resolveWireGuardKey(context.Background(), &pod.WireGuard{PrivateKeyRef: "Bad ID"}, src)
+	if err == nil || !strings.Contains(err.Error(), "valid secret id") || src.calls != 0 {
+		t.Fatalf("calls=%d err=%v", src.calls, err)
+	}
+}
+
+func TestResolveKeyNoSourceIsAnErrorNotAPanic(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("panicked: %v", r)
+		}
+	}()
+	_, _, err := resolveWireGuardKey(context.Background(), &pod.WireGuard{PrivateKeyRef: "wg"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "no secret source") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestResolveKeyFetchFailureIsAnErrorNotAPanic(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("panicked: %v", r)
+		}
+	}()
+	_, _, err := resolveWireGuardKey(context.Background(), &pod.WireGuard{PrivateKeyRef: "wg"}, &oneSource{err: errors.New("Unavailable")})
+	if err == nil || !strings.Contains(err.Error(), "Unavailable") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

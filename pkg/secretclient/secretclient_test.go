@@ -287,6 +287,17 @@ func TestCancelDuringBackoffReturnsContextError(t *testing.T) {
 	}
 }
 
+func TestBackoffWaitErrorIsReturnedAsIs(t *testing.T) {
+	sentinel := errors.New("sleep refused")
+	f := &fake{errs: []error{status.Error(codes.Unavailable, "d"), status.Error(codes.Unavailable, "d")}}
+	c := start(t, f)
+	c.sleep = func(context.Context, time.Duration) error { return sentinel }
+	_, err := c.Fetch(context.Background(), "k", 0)
+	if !errors.Is(err, sentinel) || f.calls != 1 {
+		t.Fatalf("calls=%d err=%v", f.calls, err)
+	}
+}
+
 func TestEmptyValueWithoutUnchangedIsRefused(t *testing.T) {
 	f := &fake{secrets: map[string]*guestv1.FetchResponse{"e": {Value: nil, Version: 5}}}
 	c := start(t, f)
