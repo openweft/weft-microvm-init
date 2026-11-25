@@ -47,6 +47,9 @@ const (
 	maxRecvMessageLen = 1 << 20 // generous: oversize is judged on the value, not by a transport error
 )
 
+// newClient is grpc.NewClient; a variable so a test can make it fail.
+var newClient = grpc.NewClient
+
 var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 
 // ValidID reports whether id is a well-formed secret ID.
@@ -188,7 +191,7 @@ func (c *Client) fetchOnce(ctx context.Context, id string, known uint64, timeout
 	if err != nil {
 		return nil, &dialError{err}
 	}
-	cc, err := grpc.NewClient("passthrough:///guest-secrets",
+	cc, err := newClient("passthrough:///guest-secrets",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return conn, nil }),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxRecvMessageLen)),

@@ -237,3 +237,93 @@ func TestContextCancelStopsBackoff(t *testing.T) {
 		t.Fatal("want error")
 	}
 }
+
+// noPanic fails the test, instead of crashing the binary, when f panics: a
+// guard whose removal only crashes is held by luck, not by an assertion.
+func noPanic(t *testing.T, f func()) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("panicked: %v", r)
+		}
+	}()
+	f()
+}
+
+func TestWipeNilIsSafe(t *testing.T) {
+	noPanic(t, func() { (*Secret)(nil).Wipe() })
+}
+
+func TestNoDialerMessage(t *testing.T) {
+	noPanic(t, func() {
+		_, err := (&Client{}).Fetch(context.Background(), "k", 0)
+		if err == nil || !strings.Contains(err.Error(), "no dialer") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestDialErrorIsReportedNotDereferenced(t *testing.T) {
+	noPanic(t, func() {
+		c := &Client{
+			Dial:     func(context.Context) (net.Conn, error) { return nil, errors.New("no route") },
+			Attempts: 1,
+		}
+		_, err := c.Fetch(context.Background(), "k", 0)
+		if err == nil || !strings.Contains(err.Error(), "dial host") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestCancelDuringBackoffReturnsContextError(t *testing.T) {
+	f := &fake{errs: []error{status.Error(codes.Unavailable, "d"), status.Error(codes.Unavailable, "d")}}
+	c := start(t, f)
+	ctx, cancel := context.WithCancel(context.Background())
+	c.sleep = func(ctx context.Context, _ time.Duration) error { cancel(); return ctx.Err() }
+	_, err := c.Fetch(ctx, "k", 0)
+	if !errors.Is(err, context.Canceled) || f.calls != 1 {
+		t.Fatalf("calls=%d err=%v", f.calls, err)
+	}
+}
+
+func TestEmptyValueWithoutUnchangedIsRefused(t *testing.T) {
+	f := &fake{secrets: map[string]*guestv1.FetchResponse{"e": {Value: nil, Version: 5}}}
+	c := start(t, f)
+	if _, err := c.Fetch(context.Background(), "e", 0); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestTokenSourceErrorMessage(t *testing.T) {
+	f := &fake{secrets: map[string]*guestv1.FetchResponse{"k": {Value: []byte("v"), Version: 1}}}
+	c := start(t, f)
+	c.Token = func() ([]byte, error) { return nil, errors.New("boom") }
+	_, err := c.Fetch(context.Background(), "k", 0)
+	if err == nil || !strings.Contains(err.Error(), "boot token") || f.calls != 0 {
+		t.Fatalf("calls=%d err=%v", f.calls, err)
+	}
+}
+
+func TestClientConstructionFailure(t *testing.T) {
+	old := newClient
+	defer func() { newClient = old }()
+	newClient = func(string, ...grpc.DialOption) (*grpc.ClientConn, error) { return nil, errors.New("bad target") }
+	closed := false
+	c := &Client{Dial: func(context.Context) (net.Conn, error) {
+		a, b := net.Pipe()
+		_ = b.Close()
+		return &closeSpy{Conn: a, closed: &closed}, nil
+	}}
+	_, err := c.Fetch(context.Background(), "k", 0)
+	if err == nil || !strings.Contains(err.Error(), "grpc client") || !closed {
+		t.Fatalf("closed=%v err=%v", closed, err)
+	}
+}
+
+type closeSpy struct {
+	net.Conn
+	closed *bool
+}
+
+func (c *closeSpy) Close() error { *c.closed = true; return c.Conn.Close() }
