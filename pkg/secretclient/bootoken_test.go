@@ -54,7 +54,15 @@ func TestFileTokenSourceErrorNamesLengthNotBytes(t *testing.T) {
 func TestFileTokenSourceUnreadablePathIsAnError(t *testing.T) {
 	// a directory opens but cannot be read
 	got, err := FileTokenSource(t.TempDir())()
-	if err == nil || got != nil {
+	if err == nil || got != nil || !strings.Contains(err.Error(), "read boot token failed") {
+		t.Fatalf("got %x, %v", got, err)
+	}
+}
+
+func TestFileTokenSourceOpenFailureOtherThanAbsentIsAnError(t *testing.T) {
+	// a path below a regular file fails with ENOTDIR, not "does not exist"
+	got, err := FileTokenSource(filepath.Join(tokenFile(t, []byte("x")), "raw"))()
+	if err == nil || got != nil || !strings.Contains(err.Error(), "open boot token") {
 		t.Fatalf("got %x, %v", got, err)
 	}
 }
